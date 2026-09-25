@@ -1,8 +1,17 @@
 # NInfer (RTX 2080 Ti 22GB / Turing SM75 Port)
 
-> Selected checkpoints. Maximum single-GPU inference performance.
+> Selected checkpoints. Maximum single-GPU inference performance, plus a two-GPU path to a
+> 1,048,576-token context.
 
 This repository is a specialized port of [NInfer](https://github.com/Neroued/ninfer) (originally developed by [@Neroued](https://github.com/Neroued)) optimized for NVIDIA Turing architecture (`sm_75`, tuned specifically for the **RTX 2080 Ti 22GB** modded card), while retaining compatibility with Ampere (`sm_86`) and Blackwell (`sm_120a`). It executes text and multimodal (image/video) prompts through a fast local CLI or OpenAI/Anthropic-compatible HTTP servers.
+
+> **Dual-GPU and long context.** The 27B execution package additionally runs tensor-parallel
+> across two GPUs (`--tp 2 --devices A,B`): one resident model, one process, two CUDA devices,
+> halving per-card weight and KV residency. `--rope yarn` raises the addressable context ceiling
+> from the registered 262,144 tokens up to 1,048,576, computed to match vLLM as deployed. The
+> design decisions, numerical contracts, and qualification evidence behind both features are in
+> [Dual-GPU (TP2) execution and YaRN 1M context](docs/maintainer/tp2-yarn-1m.md); see
+> [NOTICE](NOTICE) for attribution.
 
 ---
 
@@ -87,6 +96,8 @@ Measured on NVIDIA GeForce RTX 2080 Ti (`TU102` / `sm_75`, 22 GB VRAM mod, CUDA 
 ---
 
 ## Build
+
+Clone this fork, not upstream — upstream has neither `--tp 2` nor `--rope yarn`.
 
 ```bash
 git clone https://github.com/mr-september/ninfer-2080ti-22g.git
@@ -180,6 +191,66 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 
 ---
 
+## Dual-GPU (TP2) and YaRN long context
+
+`--tp 2` splits one resident 27B model across two GPUs, and `--rope yarn` raises the addressable
+context ceiling from the registered native 262,144 tokens up to 1,048,576. The two features are
+independent -- TP2 halves per-card weight and KV residency at any context, YaRN extends positions
+at either `--tp` width.
+
+TP2 is a capacity feature, not a scale-out feature: one process, one resident model, two CUDA
+devices, no NVLink and no distributed serving. It is implemented for the 27B execution package
+(`qwen3.6-27b` and `qwen3.8-27b`); `qwen3.6-35b-a3b` has no tensor-parallel path and rejects
+`--tp 2` at startup. On this port the TP2 weights profile is `groupwise-int`.
+
+### Usage
+
+```bash
+# dual-GPU serving, extended context, INT8 KV, MTP3 speculative decoding
+./build/apps/ninfer-serve models/qwen3_8_27b.ninfer \
+  --tp 2 --devices 0,1 \
+  --rope yarn --yarn-factor 4.0 --yarn-origin 262144 \
+  --max-context 65536 --kv-dtype int8 --kv-capacity auto \
+  --max-concurrency 1 \
+  --spec mtp --draft-tokens 3 --lm-head-draft
+```
+
+The same flags drive the CLI:
+
+```bash
+./build/apps/ninfer models/qwen3_8_27b.ninfer \
+  --tp 2 --devices 0,1 \
+  --rope yarn --yarn-factor 4.0 --yarn-origin 262144 \
+  --max-context 65536 --kv-dtype int8 --kv-capacity auto \
+  --prompt "Explain virtual memory in three sentences." --max-new 256
+```
+
+- `--tp 2` requires an explicit `--devices A,B` naming two distinct devices of the same compute
+  capability. `--tp 1` remains the default.
+- `--rope yarn` needs `--yarn-origin` to equal the artifact's registered native capacity
+  (`262144`); `--yarn-factor` is a finite value in `[1.0, 64.0]` and `origin x factor` must be a
+  whole token count at or below `1048576`. YaRN is rejected together with `--vision`.
+- Per-card residency at `--tp 2` is roughly half the single-GPU footprint (~8.5 GiB weights for
+  Qwen3.8-27B groupwise-int), so the paged INT8 KV pool and workspace share the remainder of each
+  22 GB card; the practical context ceiling on RTX 2080 Ti 22 GB is therefore below the
+  1,048,576 addressable maximum -- size it with `--kv-capacity auto` or an explicit
+  `--max-context`.
+- `--kv-dtype int8` is required at extended context; the BF16 KV pool is twice as large per token.
+- MTP speculative decoding (`--spec mtp --draft-tokens 1..5`, optionally `--lm-head-draft`) works
+  at `--tp 2`. `--spec dflash` and `--vision` are rejected at `--tp 2`.
+- Collectives are host-staged asynchronous copies over PCIe (GeForce cards expose no peer access),
+  captured inside one cross-device CUDA Graph; `--no-cuda-graph` runs the same forward pass
+  eagerly.
+- MTP prefix reuse resets at `--tp 2`: every compatible prefix is prefilled again instead of
+  resumed. The answer is unchanged; only the saving is lost.
+
+The design decisions behind both features -- the collective transport, the shard map, the YaRN
+constants, and what each correctness gate proves -- are in
+[Dual-GPU (TP2) execution and YaRN 1M context](docs/maintainer/tp2-yarn-1m.md), together with the
+measurement campaign conducted by the TP2 fork on 2x RTX 5090
+(see the [fork's README](https://github.com/wamansou/ninfer-tp2-1m) and
+[Performance](docs/performance.md)).
+
 ## Capabilities & Architecture
 
 - **Batched Decode**: Small-scale concurrent request scheduling with round-boundary compaction and CUDA Graph replay.
@@ -209,5 +280,6 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 
 ## License
 
-NInfer is licensed under the [Apache License 2.0](LICENSE).
-Model weights are subject to their respective upstream licenses ([Qwen License](https://huggingface.co/Qwen)).
+NInfer is licensed under the [Apache License 2.0](LICENSE). This fork\'s modifications are under the same licence; see [NOTICE](NOTICE)
+for the attribution required by Apache-2.0 §4(b). Model weights are subject to their
+respective upstream licenses ([Qwen License](https://huggingface.co/Qwen)).

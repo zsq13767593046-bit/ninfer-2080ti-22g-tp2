@@ -63,6 +63,7 @@ endif()
 # Shared mathematical Ops. The list is intentionally explicit: adding a
 # source is a build-boundary decision, not an accidental recursive-glob side effect.
 set(NINFER_OPS_SOURCES
+  ops/common/allreduce.cu
   ops/launcher/add_bias.cu
   ops/launcher/argmax.cu
   ops/launcher/cast.cu
