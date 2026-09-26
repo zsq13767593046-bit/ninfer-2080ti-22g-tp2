@@ -202,6 +202,7 @@ target_include_directories(ninfer_qwen3_6_27b_shard_map_test PRIVATE
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b/impl
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b/export
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
+target_link_libraries(ninfer_qwen3_6_27b_shard_map_test PRIVATE CUDA::cudart)
 ninfer_add_test(ninfer_qwen3_6_35b_a3b_real_test
   SOURCES targets/qwen3_6_35b_a3b/test_engine_real.cpp
   LIBRARIES ninfer_engine)
@@ -349,6 +350,11 @@ ninfer_add_op_test(ninfer_mtp_split_test
 ninfer_add_op_test(ninfer_gqa_attention_test
   SOURCES ops/test_gqa_attention.cpp
   LIBRARIES ninfer_ops)
+if(CMAKE_CUDA_ARCHITECTURES STREQUAL "75")
+  ninfer_add_op_test(ninfer_mma_sm75_test
+    SOURCES ops/test_mma_sm75.cu
+    LIBRARIES CUDA::cudart)
+endif()
 # The visible-key domain past the pre-YaRN 262144 bound: its own target because it needs multi-GiB
 # KV pools and a long FP64 oracle, and skips per case when the device cannot hold one.
 ninfer_add_op_test(ninfer_gqa_attention_long_context_test
