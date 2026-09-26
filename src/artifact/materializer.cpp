@@ -336,14 +336,80 @@ MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan
                 if (device_count > 1) { CUDA_CHECK(cudaSetDevice(devices[device_slot]->device)); }
                 bool fed = false;
                 for (std::size_t range_index = first_unfinished;
-                     range_index < ranges.size() &&
-                     ranges[range_index].source_begin < chunk_end;
+                     range_index < ranges.size() && ranges[range_index].source_begin < chunk_end;
                      ++range_index) {
                     const CopyRange& range = ranges[range_index];
                     if (range.device != index) { continue; }
                     const std::uint64_t copy_begin = std::max(source, range.source_begin);
                     const std::uint64_t copy_end   = std::min(chunk_end, range.source_end);
                     if (copy_begin >= copy_end) { continue; }
+
+                    // Strided-shard fast path. Tensor-parallel column shards arrive as one range
+                    // per row PER DEVICE, interleaved in source order with the peer device's
+                    // rows: equal byte lengths, a constant source stride, and a constant
+                    // destination stride. Uploading those row by row costs one API call and one
+                    // copy-engine submission per row -- measured as four million ~4 KiB copies
+                    // for one 17 GiB two-device load, tripling load time over the single-device
+                    // path. A run of such ranges that lies wholly inside this staging chunk
+                    // becomes ONE cudaMemcpy2DAsync whose pitches step over the peer's bytes.
+                    // Runs whose strides degenerate to the row length stay on the scalar path,
+                    // which already batches contiguous bytes as one 1D copy.
+                    std::size_t run        = 1;
+                    std::size_t last_index = range_index;
+                    std::uint64_t first_source_stride = 0;
+                    std::uint64_t first_dest_stride   = 0;
+                    if (copy_begin == range.source_begin && copy_end == range.source_end) {
+                        const std::uint64_t row_bytes = range.source_end - range.source_begin;
+                        for (std::size_t scan = range_index + 1;
+                             scan < ranges.size() && ranges[scan].source_begin < chunk_end;
+                             ++scan) {
+                            const CopyRange& candidate = ranges[scan];
+                            if (candidate.device != index) { continue; }
+                            if (candidate.source_end > chunk_end ||
+                                candidate.source_end - candidate.source_begin != row_bytes) {
+                                break;
+                            }
+                            const CopyRange& previous = ranges[last_index];
+                            const std::uint64_t source_stride =
+                                candidate.source_begin - previous.source_begin;
+                            const std::uint64_t dest_stride = static_cast<std::uint64_t>(
+                                candidate.destination - previous.destination);
+                            if (run == 1) {
+                                first_source_stride = source_stride;
+                                first_dest_stride   = dest_stride;
+                                if (source_stride == row_bytes && dest_stride == row_bytes) {
+                                    break; // contiguous: the scalar 1D copy is already optimal
+                                }
+                                if (source_stride < row_bytes || dest_stride < row_bytes) {
+                                    break; // overlapping/invalid pitch; not a strided shard
+                                }
+                            } else if (source_stride != first_source_stride ||
+                                       dest_stride != first_dest_stride) {
+                                break;
+                            }
+                            last_index = scan;
+                            ++run;
+                        }
+                    }
+                    if (run >= 2) {
+                        const std::size_t row_bytes =
+                            static_cast<std::size_t>(range.source_end - range.source_begin);
+                        CUDA_CHECK(cudaMemcpy2DAsync(
+                            range.destination, static_cast<std::size_t>(first_dest_stride),
+                            static_cast<std::byte*>(slot.buffer.data()) +
+                                static_cast<std::size_t>(range.source_begin - source),
+                            static_cast<std::size_t>(first_source_stride), row_bytes, run,
+                            cudaMemcpyHostToDevice, devices[device_slot]->load_stream));
+                        const std::uint64_t amount =
+                            static_cast<std::uint64_t>(row_bytes) * static_cast<std::uint64_t>(run);
+                        copied =
+                            checked_add(copied, amount, "artifact copied byte count overflows u64");
+                        out.stats_.per_device_h2d_bytes[device_slot] += amount;
+                        fed = true;
+                        range_index = last_index;
+                        continue;
+                    }
+
                     const auto amount = static_cast<std::size_t>(copy_end - copy_begin);
                     CUDA_CHECK(cudaMemcpyAsync(
                         range.destination +
@@ -362,7 +428,6 @@ MaterializedArtifact materialize(const Reader& reader, const MaterializationPlan
                     slot.pending[device_slot] = true;
                 }
             }
-
             if (progress != nullptr && progress->callback && copied != last_published &&
                 copied < total) {
                 last_published = copied;
