@@ -306,9 +306,13 @@ int run_fp8() {
 
     failures += run_fp8_case(parent, 1, ops::LinearPolicy::A16Only, true);
     failures += run_fp8_case(parent, 2, ops::LinearPolicy::A16Only);
+#if !defined(NINFER_SM75)
+    // The FP8 A8 route needs sm_90+ FP8 tensor cores; on sm_75 its MMA helper is a no-op stub
+    // and the route is unreachable product hardware.
     for (const std::int32_t tokens : {1, 2, 7, 8, 48, 65, 1024}) {
         failures += run_fp8_case(parent, tokens, ops::LinearPolicy::AllowA8);
     }
+#endif
     return failures;
 }
 
@@ -323,7 +327,9 @@ int main() {
     int failures = 0;
     failures += run_q4_q5();
     failures += run_w8();
+#if !defined(NINFER_SM75)
     failures += run_nvfp4();
+#endif
     failures += run_fp8();
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_input_proj\n";
     return failures == 0 ? 0 : 1;
