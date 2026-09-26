@@ -84,12 +84,14 @@ Q4Q5GdnInputPlan q4_q5_gdn_input_resolve_plan(const Q4Q5GdnInputProblem& problem
             "Q4/Q5 GDN input: exact problem or column count is not admitted");
     }
 
-    // The shard shape has no tuned small-T exact kernel (q4_q5_gdn_input_independent_launch
-    // is compile-time-exact to the tp1 parent's 4096/12288 row counts -- see the file's own
-    // kQkRows/kValueRows constants). The shard always routes through the grouped-MMA kernel, which
-    // is already row-count-generic (reads shapes from the Weight/Tensor arguments at runtime, see
-    // launch_slice below) -- the same fall-off attn_input_proj's Q4/Q5 shard takes at small T.
-    if (supported_shard_shape(problem)) { return {Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128}; }
+    // The shard has its own instantiation of the small-T exact independent kernels
+    // (q4_q5_gdn_input_independent_shard_launch, compile-time-exact to 2048/3072/3072) and takes
+    // the same column-count route as the tp1 parent: cols in [1,16] go there, wider columns go
+    // through the row-count-generic grouped-MMA kernel.
+    if (supported_shard_shape(problem)) {
+        if (problem.cols <= 16) { return {Q4Q5GdnInputScheduleId::IndependentDirectFixed}; }
+        return {Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128};
+    }
 
     for (const RouteSpec& route : kRoutes) {
         if (!route.cols.contains(problem.cols)) { continue; }
@@ -132,7 +134,12 @@ void q4_q5_gdn_input_execute_plan(const Q4Q5GdnInputPlan& plan, const Tensor& x,
     case Q4Q5GdnInputScheduleId::IndependentDirectFixed: {
         Tensor qk    = qkv.slice(0, 0, problem.qk_rows);
         Tensor value = qkv.slice(0, problem.qk_rows, problem.z_rows);
-        q4_q5_gdn_input_independent_launch(x, qk_weight, value_z_weight, qk, value, z, stream);
+        if (supported_shard_shape(problem)) {
+            q4_q5_gdn_input_independent_shard_launch(x, qk_weight, value_z_weight, qk, value, z,
+                                                     stream);
+        } else {
+            q4_q5_gdn_input_independent_launch(x, qk_weight, value_z_weight, qk, value, z, stream);
+        }
         return;
     }
     case Q4Q5GdnInputScheduleId::GroupedMixedMmaR64C128:
