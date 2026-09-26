@@ -89,14 +89,20 @@ void nvfp4_linear_add_w4a4_launch(const Tensor&, const Weight&, Tensor&,
 }
 
 void nvfp4_linear_add_dispatch(const Tensor&, const Weight&, Tensor&,
-                               LinearPolicy, WorkspaceArena&, cudaStream_t) {
+                               LinearPolicy, WorkspaceArena*, cudaStream_t) {
     throw std::runtime_error("NVFP4 linear_add dispatch is supported only on sm_120a (Blackwell)");
 }
 
 // Linear SwiGLU
 std::size_t nvfp4_linear_swiglu_workspace_capacity_bytes(LinearPolicy,
-                                                         std::int32_t,
-                                                         std::int32_t) {
+                                                          std::int32_t,
+                                                          std::int32_t) {
+    return 0;
+}
+
+std::size_t nvfp4_linear_swiglu_shard_workspace_capacity_bytes(LinearPolicy,
+                                                                std::int32_t,
+                                                                std::int32_t) {
     return 0;
 }
 
@@ -116,9 +122,14 @@ void nvfp4_linear_swiglu_w4a4_launch(const Tensor&, const Weight&, Tensor&,
 }
 
 void nvfp4_linear_swiglu_dispatch(const Tensor&, const Weight&, Tensor&,
-                                  LinearPolicy, WorkspaceArena&,
-                                  cudaStream_t) {
+                                   LinearPolicy, WorkspaceArena&,
+                                   cudaStream_t) {
     throw std::runtime_error("NVFP4 linear_swiglu dispatch is supported only on sm_120a (Blackwell)");
+}
+
+void nvfp4_linear_swiglu_dispatch_shard(const Tensor&, const Weight&, Tensor&,
+                                         LinearPolicy, WorkspaceArena*, cudaStream_t) {
+    throw std::runtime_error("NVFP4 linear_swiglu shard is supported only on sm_120a (Blackwell)");
 }
 
 // Attention Input Proj
@@ -145,9 +156,15 @@ void nvfp4_attn_input_w4a4_launch(const Tensor&, const Weight&, Tensor&, Tensor&
 }
 
 void nvfp4_attn_input_dispatch(const Tensor&, const Weight&, Tensor&, Tensor&,
-                               Tensor&, Tensor&, LinearPolicy, WorkspaceArena*,
-                               cudaStream_t) {
+                                Tensor&, Tensor&, LinearPolicy, WorkspaceArena*,
+                                cudaStream_t) {
     throw std::runtime_error("NVFP4 attn_input dispatch is supported only on sm_120a (Blackwell)");
+}
+
+void nvfp4_attn_input_dispatch_shard(const Tensor&, const Weight&, Tensor&, Tensor&,
+                                      Tensor&, Tensor&, LinearPolicy, WorkspaceArena*,
+                                      cudaStream_t) {
+    throw std::runtime_error("NVFP4 attn_input shard is supported only on sm_120a (Blackwell)");
 }
 
 // GDN Input Proj
@@ -173,8 +190,13 @@ void nvfp4_gdn_input_w4a4_launch(const Tensor&, const Weight&, Tensor&, Tensor&,
 }
 
 void nvfp4_gdn_input_dispatch(const Tensor&, const Weight&, Tensor&, Tensor&,
-                              LinearPolicy, WorkspaceArena*, cudaStream_t) {
+                               LinearPolicy, WorkspaceArena*, cudaStream_t) {
     throw std::runtime_error("NVFP4 gdn_input dispatch is supported only on sm_120a (Blackwell)");
+}
+
+void nvfp4_gdn_input_dispatch_shard(const Tensor&, const Weight&, Tensor&, Tensor&,
+                                     LinearPolicy, WorkspaceArena*, cudaStream_t) {
+    throw std::runtime_error("NVFP4 gdn_input shard is supported only on sm_120a (Blackwell)");
 }
 
 // GDN Snapshot & Conv
