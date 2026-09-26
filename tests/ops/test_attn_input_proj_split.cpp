@@ -728,8 +728,14 @@ int verify_registry() {
             }
         }
     }
-    // FP8's fused column-parallel shard.
-    for (const ops::LinearPolicy policy : {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8}) {
+    // FP8's fused column-parallel shard. The A8 policy needs sm_90+ FP8 tensor cores; on sm_75
+    // its MMA helper is a no-op stub, so only the A16 policy runs there.
+    for (const ops::LinearPolicy policy :
+#if defined(NINFER_SM75)
+         {ops::LinearPolicy::A16Only}) {
+#else
+         {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8}) {
+#endif
         for (const std::int32_t tokens : {1, 2, 48, 1024}) {
             try {
                 (void)ops::attn_input_proj_column_parallel_workspace_capacity_bytes(
@@ -887,19 +893,27 @@ int main() {
               << '\n';
 
     failures += verify_split_rejections(ec);
-    // T sweep: T=1 (decode edge), small-T/MMA frontiers, T=128 (W4A4 MMA under AllowA4), T=1024 (a
-    // multiple of 256 -- the sole route into the NVFP4 W4A4 TMA kernel, exercised on the shard
-    // TMA descriptor as well as the tp1 one).
+#if !defined(NINFER_SM75)
+    // NVFP4 kernels exist only on sm_120a; the stub throws there, which would abort this suite
+    // before the groupwise-int leg below can run.
     failures += run_fused_case(ec, QType::NVFP4, 41u, "nvfp4 attn_input fused",
                                {1, 2, 5, 8, 17, 32, 48, 128, 1024},
                                {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA4});
+#endif
     // FP8's own tp2 column shard, wired as a TRUE split (the fused kernel family is
     // Geometry-templated, same as NVFP4 -- see attn_input_proj.h's design note). T sweep: 1 the
     // decode edge; 2/8/10 small-T (kFp8LinearSmallTMax<AttnInput>=11); 11 the AllowA8 route's own
     // A8 crossover; 32/48/128/1024 beyond it.
+    const std::vector<ops::LinearPolicy> fp8_shard_policies{
+#if defined(NINFER_SM75)
+        // FP8 A8 needs sm_90+ tensor cores; the route is unreachable on sm_75.
+        ops::LinearPolicy::A16Only
+#else
+        ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8
+#endif
+    };
     failures += run_fused_case(ec, QType::FP8_E4M3FN_ROW_BF16S, 46u, "fp8 attn_input fused",
-                               {1, 2, 8, 10, 11, 32, 48, 128, 1024},
-                               {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8});
+                               {1, 2, 8, 10, 11, 32, 48, 128, 1024}, fp8_shard_policies);
     failures += run_split_storage_case(ec, 43u);
 
     std::cout << (failures ? "FAIL" : "OK") << " attn_input_proj split\n";

@@ -1099,7 +1099,14 @@ int verify_registry() {
         const std::vector<ops::LinearPolicy> policies =
             qtype == QType::NVFP4
                 ? std::vector<ops::LinearPolicy>{ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA4}
-                : std::vector<ops::LinearPolicy>{ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8};
+                : std::vector<ops::LinearPolicy>{
+#if defined(NINFER_SM75)
+                      // FP8 A8 needs sm_90+ tensor cores; the route is unreachable on sm_75.
+                      ops::LinearPolicy::A16Only
+#else
+                      ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8
+#endif
+                };
         for (const ops::LinearPolicy policy : policies) {
             for (const std::int32_t tokens : {1, 2, 48, 1024}) {
                 try {
@@ -1246,11 +1253,21 @@ int main() {
               << '\n';
 
     failures += verify_split_rejections(ec);
+#if !defined(NINFER_SM75)
+    // NVFP4 kernels exist only on sm_120a; the stub throws there, which would abort this suite
+    // before the groupwise-int legs below can run.
     failures += run_fused_case(
         ec, QType::NVFP4, {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA4}, 41u);
-    failures += run_fused_case(
-        ec, QType::FP8_E4M3FN_ROW_BF16S, {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8},
-        45u);
+#endif
+    const std::vector<ops::LinearPolicy> fp8_fused_policies{
+#if defined(NINFER_SM75)
+        // FP8 A8 needs sm_90+ tensor cores; the route is unreachable on sm_75.
+        ops::LinearPolicy::A16Only
+#else
+        ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8
+#endif
+    };
+    failures += run_fused_case(ec, QType::FP8_E4M3FN_ROW_BF16S, fp8_fused_policies, 45u);
     failures += run_split_storage_case(ec, 43u);
     failures += run_gating_case(ec, 51u);
     failures += run_gating_fused_case(ec, 53u, 48);

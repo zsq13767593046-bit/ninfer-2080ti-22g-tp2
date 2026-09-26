@@ -941,11 +941,15 @@ int run_fp8() {
     failures += run_fp8_case(parent, 4, ops::LinearPolicy::A16Only, 5);
     failures += run_fp8_case(parent, 6, ops::LinearPolicy::A16Only, 7);
     failures += run_fp8_case(parent, 7, ops::LinearPolicy::A16Only, 8);
+#if !defined(NINFER_SM75)
+    // The FP8 A8 route needs sm_90+ FP8 tensor cores; on sm_75 its MMA helper is a no-op stub
+    // and the route is unreachable product hardware.
     failures += run_fp8_case(parent, 9, ops::LinearPolicy::AllowA8, 10);
     failures += run_fp8_case(parent, 10, ops::LinearPolicy::AllowA8, 11);
+    failures += run_fp8_case(parent, 17, ops::LinearPolicy::AllowA8, 1);
+#endif
     failures += run_fp8_case(parent, 10, ops::LinearPolicy::A16Only, 11);
     failures += run_fp8_case(parent, 11, ops::LinearPolicy::A16Only, 12);
-    failures += run_fp8_case(parent, 17, ops::LinearPolicy::AllowA8, 1);
 
     const auto run_batched = [&](std::int32_t width, std::int32_t batch,
                                  std::vector<std::int32_t> valid_columns, std::uint32_t seed) {
@@ -980,7 +984,11 @@ int run_fp8() {
             });
     };
     failures += run_batched(4, 2, {4, 2}, 937U);
+#if !defined(NINFER_SM75)
+    // W*B=128 crosses the FP8 A8 route's activation-quantize crossover; sm_75 has no FP8
+    // tensor cores.
     failures += run_batched(16, 8, {16, 13, 11, 7, 5, 3, 2, 1}, 941U);
+#endif
     failures += parent.verify_preserved("batched FP8 parent weight");
     return failures;
 }
@@ -1012,6 +1020,8 @@ int main() {
         std::cerr << "W8 snapshot interval did not preserve its zero/nonzero route boundary\n";
         ++failures;
     }
+#if !defined(NINFER_SM75)
+    // NVFP4 plan resolution is a constant stub on sm_75; the interval contract is sm_120a's.
     const std::size_t nvfp4_a4_4 = ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
         QType::NVFP4, 16384, 5120, ops::LinearPolicy::AllowA4, 1, 4, 4);
     if (ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
@@ -1024,6 +1034,7 @@ int main() {
         std::cerr << "NVFP4 snapshot interval did not preserve its A16/A4 route boundary\n";
         ++failures;
     }
+#endif
     const auto fp8_snapshot_capacity = [](ops::LinearPolicy policy, std::int32_t batch,
                                           std::int32_t min_width, std::int32_t max_width) {
         return ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
@@ -1046,7 +1057,9 @@ int main() {
     }
     failures += run_q4_q5();
     failures += run_w8();
+#if !defined(NINFER_SM75)
     failures += run_nvfp4();
+#endif
     failures += run_fp8();
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_input_proj_conv_snapshot\n";
     return failures == 0 ? 0 : 1;

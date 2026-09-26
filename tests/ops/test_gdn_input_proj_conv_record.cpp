@@ -527,15 +527,19 @@ int run_fp8() {
     failures += run_fp8_oracle_case(parent, 3, 1, {2}, ops::LinearPolicy::A16Only, 1721U);
     failures += run_fp8_oracle_case(parent, 4, 1, {}, ops::LinearPolicy::A16Only, 1731U);
     failures += run_fp8_oracle_case(parent, 6, 1, {5}, ops::LinearPolicy::A16Only, 1741U);
+#if !defined(NINFER_SM75)
+    // The FP8 A8 route needs sm_90+ FP8 tensor cores; on sm_75 its MMA helper is a no-op stub
+    // and the route is unreachable product hardware.
     failures += run_fp8_oracle_case(parent, 7, 1, {}, ops::LinearPolicy::AllowA8, 1751U);
     failures += run_fp8_oracle_case(parent, 9, 1, {7}, ops::LinearPolicy::AllowA8, 1761U);
     failures += run_fp8_oracle_case(parent, 10, 1, {}, ops::LinearPolicy::AllowA8, 1771U);
-    failures += run_fp8_oracle_case(parent, 10, 1, {8}, ops::LinearPolicy::A16Only, 1781U);
-    failures += run_fp8_oracle_case(parent, 11, 1, {9}, ops::LinearPolicy::A16Only, 1791U);
     failures += run_fp8_oracle_case(parent, 3, 2, {3, 1}, ops::LinearPolicy::AllowA8, 1801U);
     failures += run_fp8_oracle_case(parent, 4, 2, {4, 2}, ops::LinearPolicy::AllowA8, 1811U);
     failures += run_fp8_oracle_case(parent, 16, 8, {16, 13, 11, 7, 5, 3, 2, 1},
                                     ops::LinearPolicy::AllowA8, 1821U);
+#endif
+    failures += run_fp8_oracle_case(parent, 10, 1, {8}, ops::LinearPolicy::A16Only, 1781U);
+    failures += run_fp8_oracle_case(parent, 11, 1, {9}, ops::LinearPolicy::A16Only, 1791U);
     return failures;
 }
 
@@ -565,7 +569,9 @@ int main() {
     }
     failures += run_q4_q5();
     failures += run_w8();
+#if !defined(NINFER_SM75)
     failures += run_nvfp4();
+#endif
     failures += run_fp8();
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_input_proj_conv_record\n";
     return failures == 0 ? 0 : 1;
