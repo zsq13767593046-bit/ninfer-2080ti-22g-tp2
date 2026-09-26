@@ -1,7 +1,7 @@
 # NInfer (RTX 2080 Ti 22GB / Turing SM75 Port)
 
-> Selected checkpoints. Maximum single-GPU inference performance, plus a two-GPU path to a
-> 1,048,576-token context.
+> Selected checkpoints. Maximum single-GPU inference performance, plus a two-GPU path that is
+> both faster (+61% decode) and reaches a 1,048,576-token addressable context.
 
 This repository is a specialized port of [NInfer](https://github.com/Neroued/ninfer) (originally developed by [@Neroued](https://github.com/Neroued)) optimized for NVIDIA Turing architecture (`sm_75`, tuned specifically for the **RTX 2080 Ti 22GB** modded card), while retaining compatibility with Ampere (`sm_86`) and Blackwell (`sm_120a`). It executes text and multimodal (image/video) prompts through a fast local CLI or OpenAI/Anthropic-compatible HTTP servers.
 
@@ -78,6 +78,8 @@ Measured on NVIDIA GeForce RTX 2080 Ti (`TU102` / `sm_75`, 22 GB VRAM mod, CUDA 
 
 - **Custom W8 GEMM & Split-K Kernels**: Tailored for Turing SM75 thread-block limits and register allocation.
 - **GDN Routing Optimization**: Routes GDN gating projections to `MmaUnsplit` for token counts $T \ge 9$, resolving cooperative launch limits on Turing.
+- **TP2 Shard Small-T Routing**: The tensor-parallel Q4/Q5 attention and GDN input shards run their own small-T exact-kernel instantiations at decode widths (cols ≤ 16), making `--tp 2` decode faster than `--tp 1` (+61% measured) instead of falling back to the prefill-shaped grouped-MMA kernels.
+- **Batched Shard Materialization**: Two-device weight upload batches strided column-shard ranges into `cudaMemcpy2DAsync` calls; a full TP2 load takes ~3.0 s instead of 9.5 s.
 - **22GB VRAM Memory Tuning**: Startup sizing headroom and paged INT8/BF16 KV allocation profiles calibrated for 22GB capacity.
 - **Reasoning Effort Control**: Configurable thinking depth via `--reasoning-effort none|minimal|low|medium|high|xhigh` (`none` disables thinking; `minimal`/`low` concise reasoning; `medium`/`high`/`xhigh` comprehensive reasoning).
 
@@ -199,18 +201,20 @@ independent -- TP2 halves per-card weight and KV residency at any context, YaRN 
 at either `--tp` width.
 
 TP2 is a capacity feature, not a scale-out feature: one process, one resident model, two CUDA
-devices, no NVLink and no distributed serving. It is implemented for the 27B execution package
-(`qwen3.6-27b` and `qwen3.8-27b`); `qwen3.6-35b-a3b` has no tensor-parallel path and rejects
-`--tp 2` at startup. On this port the TP2 weights profile is `groupwise-int`.
+devices, no distributed serving. It is implemented for the 27B execution package (`qwen3.6-27b`
+and `qwen3.8-27b`); `qwen3.6-35b-a3b` has no tensor-parallel path and rejects `--tp 2` at
+startup. On this port the TP2 weights profile is `groupwise-int`, and the Q4/Q5 shard
+projections route through their own small-T exact-kernel instantiations at decode widths, so TP2
+is **faster** than TP1 on this hardware rather than merely larger.
 
 ### Usage
 
 ```bash
-# dual-GPU serving, extended context, INT8 KV, MTP3 speculative decoding
+# dual-GPU serving, 512K context, INT8 KV, MTP3 speculative decoding
 ./build/apps/ninfer-serve models/qwen3_8_27b.ninfer \
   --tp 2 --devices 0,1 \
   --rope yarn --yarn-factor 4.0 --yarn-origin 262144 \
-  --max-context 65536 --kv-dtype int8 --kv-capacity auto \
+  --max-context 524288 --kv-dtype int8 --kv-capacity auto \
   --max-concurrency 1 \
   --spec mtp --draft-tokens 3 --lm-head-draft
 ```
@@ -221,7 +225,7 @@ The same flags drive the CLI:
 ./build/apps/ninfer models/qwen3_8_27b.ninfer \
   --tp 2 --devices 0,1 \
   --rope yarn --yarn-factor 4.0 --yarn-origin 262144 \
-  --max-context 65536 --kv-dtype int8 --kv-capacity auto \
+  --max-context 524288 --kv-dtype int8 --kv-capacity auto \
   --prompt "Explain virtual memory in three sentences." --max-new 256
 ```
 
@@ -230,19 +234,38 @@ The same flags drive the CLI:
 - `--rope yarn` needs `--yarn-origin` to equal the artifact's registered native capacity
   (`262144`); `--yarn-factor` is a finite value in `[1.0, 64.0]` and `origin x factor` must be a
   whole token count at or below `1048576`. YaRN is rejected together with `--vision`.
-- Per-card residency at `--tp 2` is roughly half the single-GPU footprint (~8.5 GiB weights for
-  Qwen3.8-27B groupwise-int), so the paged INT8 KV pool and workspace share the remainder of each
-  22 GB card; the practical context ceiling on RTX 2080 Ti 22 GB is therefore below the
-  1,048,576 addressable maximum -- size it with `--kv-capacity auto` or an explicit
-  `--max-context`.
 - `--kv-dtype int8` is required at extended context; the BF16 KV pool is twice as large per token.
 - MTP speculative decoding (`--spec mtp --draft-tokens 1..5`, optionally `--lm-head-draft`) works
   at `--tp 2`. `--spec dflash` and `--vision` are rejected at `--tp 2`.
-- Collectives are host-staged asynchronous copies over PCIe (GeForce cards expose no peer access),
-  captured inside one cross-device CUDA Graph; `--no-cuda-graph` runs the same forward pass
-  eagerly.
+- Collectives are capturable cross-device UVA copies inside one cross-device CUDA Graph: direct
+  over NVLink when the driver grants peer access (two bridged 2080 Tis measure 43.8 GiB/s and a
+  2-7 µs 10 KiB latency), transparently host-staged when it does not. `--no-cuda-graph` runs the
+  same forward pass eagerly.
 - MTP prefix reuse resets at `--tp 2`: every compatible prefix is prefilled again instead of
   resumed. The answer is unchanged; only the saving is lost.
+- With thinking disabled (`--no-thinking` / `reasoning_effort: none`) and greedy sampling, short
+  or trivial prompts can end after one token. That is model behavior, identical at both `--tp`
+  widths (verified token-for-token); prefer the default thinking mode for real requests.
+
+### Measured on this host (2x RTX 2080 Ti 22GB, NVLink NV2, CUDA 12.8)
+
+Qwen3.8-27B `groupwise-int`, INT8 group-64 KV, greedy, `--max-context 8192`:
+
+| Configuration | Decode throughput |
+|---|---:|
+| `--tp 1`, MTP3 | 17.0 tok/s |
+| `--tp 2`, MTP3 | **27.5 tok/s (+61%)** |
+
+Serving with the full 512K YaRN window (`--max-context 524288 --kv-capacity auto`, one active
+request, temperature 0.6): **25.9 tok/s committed decode at 2.19 MTP tok/round**. MTP3 acceptance
+is prompt-dependent, measured between 40% and 90% on this model.
+
+Memory per card at the 512K YaRN + MTP3 configuration: 8.97 GiB weights + 9.21 GiB runtime KV
+pool + workspace and graphs, ~18.9 GiB resident of 22 GiB, with `--kv-capacity auto` resolving
+exactly **524,288 tokens** and 1 GiB of headroom -- that is the practical ceiling of these cards
+(the 1,048,576 addressable maximum needs 32 GiB-class devices). Two-device model load takes
+~3.0 s: the column shards upload through batched strided `cudaMemcpy2DAsync` calls rather than
+per-row copies.
 
 The design decisions behind both features -- the collective transport, the shard map, the YaRN
 constants, and what each correctness gate proves -- are in
