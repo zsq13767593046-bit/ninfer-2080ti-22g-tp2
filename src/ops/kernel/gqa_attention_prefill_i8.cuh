@@ -309,13 +309,17 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
 
     auto issue_kv_tile = [&](int tile_k0) {
         const int physical_page = block_table[tile_k0 >> kPagedKVPageShift];
+        // On sm_75 Bc=32, so two key tiles share one 64-token KV page. The
+        // second tile must begin at page offset 32, not at the start of the page.
+        const int page_offset = tile_k0 & kPagedKVPageMask;
         for (int key_l = tid; key_l < Bc; key_l += kGqaPrefillI8Threads) {
             const int key = tile_k0 + key_l;
             __half* kd    = &k_scale_s[key_l * Groups];
             __half* vd    = &v_scale_s[key_l * Groups];
             if (key <= max_query_abs) {
                 const std::int64_t off =
-                    gqa_kv_quant_scale_index<Geometry>(physical_page, kv_head, 0, key_l);
+                    gqa_kv_quant_scale_index<Geometry>(physical_page, kv_head, 0,
+                                                        page_offset + key_l);
                 ninfer::ops::cp_async<8>(kd, &cache_k_scale[off]);
                 ninfer::ops::cp_async<8>(vd, &cache_v_scale[off]);
             } else {
@@ -333,7 +337,8 @@ __global__ __maxnreg__(120) void gqa_attention_prefill_i8_kernel(
             std::int8_t* vd = &v_i8[key_l * D + d];
             if (key <= max_query_abs) {
                 const std::int64_t off =
-                    gqa_kv_quant_code_index<Geometry>(physical_page, kv_head, d, key_l);
+                    gqa_kv_quant_code_index<Geometry>(physical_page, kv_head, d,
+                                                       page_offset + key_l);
                 cp_async<16, Cache::cg>(kd, &cache_k[off]);
                 cp_async<16, Cache::cg>(vd, &cache_v[off]);
             } else {

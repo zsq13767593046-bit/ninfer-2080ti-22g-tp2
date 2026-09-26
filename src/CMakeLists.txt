@@ -74,6 +74,7 @@ set(NINFER_OPS_SOURCES
   ops/launcher/bidirectional_gqa_attention.cu
   ops/launcher/swa.cu
   ops/launcher/gqa_attention_decode.cu
+  ops/launcher/gqa_attention_decode_tp2.cu
   ops/launcher/gqa_attention_prefill.cu
   ops/launcher/kv_cache_append_prefix.cu
   ops/launcher/l2norm.cu

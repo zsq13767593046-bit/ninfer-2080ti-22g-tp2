@@ -462,6 +462,12 @@ int run_geometry(const Geometry& geometry) {
         for (const AttentionCase& test_case : a1_cases) {
             failures += run_a1_case(geometry, dtype, test_case, MappingPattern::Identity);
         }
+        if (dtype == DType::I8) {
+            // On sm_75 this six-token decode window crosses the 2054-key route boundary.
+            // It must run through the Bc=32 shared-memory profile without losing page ids.
+            failures += run_a1_case(geometry, dtype, {6, 2050, 2060, 206u},
+                                    MappingPattern::Fragmented);
+        }
 
         const AttentionCase a3_cases[] = {
             {1, 31, 32, 301u},

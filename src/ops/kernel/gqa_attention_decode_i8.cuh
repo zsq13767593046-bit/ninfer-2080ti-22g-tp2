@@ -99,14 +99,20 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     // Occupancy guard: `MinBlocksPerSm` is this instantiation's own `__launch_bounds__` target and
     // `PageIds` scales with the Op's visible-key domain. The dynamic arena counts against the same
     // per-SM budget as the static arrays. See kGqaDecodeSharedResidencyBytes.
-    constexpr int DynamicSharedBytes = DynamicArena ? 4 * Bc * D : 0;
+    //
+    // The page-id staging lives at the TAIL of the dynamic shared region, not in a static array:
+    // on sm_75 the static-arena instantiations were 64 B under the 48 KiB static ceiling before
+    // the visible-key domain was widened to 1,048,576 keys, and the PageIds growth that followed
+    // pushed them over it. Dynamic shared memory is charged against the (larger) opt-in per-block
+    // budget instead, on every architecture.
+    constexpr int DynamicSharedBytes =
+        (DynamicArena ? 4 * Bc * D : 0) + gqa_shared_align16(PageIds * static_cast<int>(sizeof(std::int32_t)));
     constexpr int StaticSharedBytes =
         gqa_shared_align16(Br * D) +                                    // q_s (int8)
         gqa_shared_align16(DynamicArena ? 16 : 4 * Bc * D) +            // static_r_s (int8)
         gqa_shared_align16(Br * Bc * static_cast<int>(sizeof(__nv_bfloat16))) +      // p_s
         gqa_shared_align16(Br * static_cast<int>(sizeof(float))) +                   // alpha_s
-        2 * gqa_shared_align16(Bc * Groups * static_cast<int>(sizeof(__half))) +     // k/v scales
-        gqa_shared_align16(PageIds * static_cast<int>(sizeof(std::int32_t)));        // page ids
+        2 * gqa_shared_align16(Bc * Groups * static_cast<int>(sizeof(__half)));      // k/v scales
     static_assert((StaticSharedBytes + DynamicSharedBytes) * MinBlocksPerSm <=
                       kGqaDecodeSharedResidencyBytes,
                   "INT8 decode CTA shared memory no longer fits its MinBlocksPerSm target on one "
@@ -117,6 +123,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     __shared__ __align__(16) std::int8_t static_r_s[DynamicArena ? 16 : 4 * Bc * D];
     extern __shared__ __align__(16) std::int8_t dynamic_r_s[];
     std::int8_t* r_s      = DynamicArena ? dynamic_r_s : static_r_s;
+    std::int32_t* physical_pages_s = reinterpret_cast<std::int32_t*>(
+        dynamic_r_s + (DynamicArena ? 4 * Bc * D : 0));
     std::int8_t* q_i8     = q_s;
     float* q_scale_tmp    = reinterpret_cast<float*>(r_s);
     std::int8_t* k_i8     = r_s;
@@ -128,7 +136,6 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     __shared__ float alpha_s[Br];
     __shared__ __align__(16) __half k_scale_s[Bc * Groups];
     __shared__ __align__(16) __half v_scale_s[Bc * Groups];
-    __shared__ std::int32_t physical_pages_s[PageIds];
 
     const int kv_head     = static_cast<int>(blockIdx.x);
     const int split       = static_cast<int>(blockIdx.y);

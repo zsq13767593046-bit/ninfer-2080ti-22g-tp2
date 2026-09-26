@@ -802,6 +802,7 @@ int main() {
         {"gqa_attention", 1, 64, 70, MappingPattern::Offset, 1102u},
         {"gqa_attention", 6, 61, 67, MappingPattern::Fragmented, 1103u},
         {"gqa_attention", 6, 190, 512, MappingPattern::Identity, 1104u},
+        {"gqa_attention", 6, 2050, 2060, MappingPattern::Fragmented, 1107u},
         {"gqa_attention", 17, 31, 48, MappingPattern::Fragmented, 1105u},
         {"gqa_attention", 66, 63, 129, MappingPattern::Identity, 1106u},
         {"gqa_attention_cached", 1, 128, 129, MappingPattern::Fragmented, 1201u},
